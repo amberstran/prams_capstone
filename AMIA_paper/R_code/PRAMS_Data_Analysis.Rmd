@@ -1,0 +1,224 @@
+---
+title: "PRAMS Data Analysis R Notebook"
+author: "Amber Tran"
+date: "Nov 2024"
+output: html_document
+---
+
+```{r packages}
+library(dplyr)
+library(pROC)
+library(ggplot2)
+```
+
+Analysis 1: Predictive factors for BC
+Method: logistic regression
+
+```{r data1}
+dat <- read.csv('/Users/ambertran/Documents/Yale_MS_Health_Informatics/BIS_560/PRAMS_Dataset1_Clean.csv')
+head(dat)
+```
+
+Visualize birth control usage by state (0 = no, 1 = yes)
+```{r overview}
+dat_yn <- dat %>%
+  mutate(BC_NOW4 = factor(BC_NOW4, levels = c(0, 1), labels = c("No", "Yes")))
+
+ggplot(dat_yn, aes(x = STATE, fill = BC_NOW4)) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportion of Birth Control Usage by PRAMS Site",
+       x = "State",
+       y = "Proportion",
+       fill = "Birth Control Usage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+Model with state included
+```{r model_state}
+# Change STATE to numerical variable
+dat <- dat %>%
+  mutate(STATE = as.numeric(as.factor(STATE)))
+model <- glm("BC_NOW4 ~ STATE + INCOME8 + MARRIED + MAT_AGE_PU + MAT_DEG + MAT_RACE_PU + HISP_BC + PP_INS_TYPE", data = dat, family = binomial(link = "logit"))
+summary(model)
+exp(coef(model))
+```
+Predictors MARRIED and HISP_BC, as well as MAT_AGE_PU, have Odds Ratios far from 1, indicating notable effects on our model.
+STATE does not seem to have a significant OR here -- which may be because of how the states are encoded numerically.
+
+
+Model without state included
+```{r model_no_state}
+predictors_reduced <- c("INCOME8", "MARRIED", "MAT_AGE_PU", "MAT_DEG", "MAT_RACE_PU", "HISP_BC", "PP_INS_TYPE")
+model_reduced <- glm("BC_NOW4 ~ INCOME8 + MARRIED + MAT_AGE_PU + MAT_DEG + MAT_RACE_PU + HISP_BC + PP_INS_TYPE", data = dat, family = binomial(link = "logit"))
+summary(model_reduced)
+exp(coef(model_reduced))
+```
+Predictors MARRIED and HISP_BC, as well as MAT_AGE_PU, have Odds Ratios far from 1, indicating notable effects on our model.
+
+
+Comparing both models
+```{r compare}
+anova(model_reduced, model, test = "Chisq")
+```
+We observe a reduction in the residual deviance by 13.696 with a low p-value < 0.05 (p = 0.0002), suggesting that STATE is a significant predictor of birth control usage after controlling for demographic and insurance factors. 
+
+
+```{r}
+roc_curve <- roc(dat$BC_NOW4, fitted(model))
+plot(roc_curve)
+auc(roc_curve)
+
+```
+Our model has a 54.87% chance of correctly classifying birth control or no birth control right now.
+
+
+
+Analysis 2: Barriers to adopting birth control
+Method: chi-square of proportions
+
+```{r data2}
+dat2 <- read.csv('/Users/ambertran/Documents/Yale_MS_Health_Informatics/BIS_560/PRAMS_Dataset2_Clean.csv')
+head(dat2)
+```
+
+Proportion of individuals who said yes, this was a reason by state
+```{r proprotions}
+# List of reason variables for not using birth control
+reason_vars <- c('BCB_PREG_RAW', 'BCB_PNOW_RAW', 'BCB_TUBE_RAW', 
+                 'BCB_WANT_RAW', 'BCB_SIDE_RAW', 'BCB_NSEX_RAW', 
+                 'BCB_HUSB_RAW', 'BCB_PAY_RAW')
+
+# Create a function to calculate proportions for each variable
+calculate_proportions <- function(dat2, reason_vars) {
+  dat2 %>%
+    group_by(STATE) %>%
+    summarise(across(all_of(reason_vars), 
+                     ~ sum(. == 2, na.rm = TRUE) / sum(!is.na(.)), 
+                     .names = "prop_{.col}"))  # Proportions of '2' for each reason
+}
+
+# Apply the function
+state_proportions <- calculate_proportions(dat2, reason_vars)
+
+# View the result
+print(state_proportions)
+```
+
+```{r }
+# Sort by the 'prop_BCB_PAY_RAW' column and select the top 10 rows
+top_10 <- state_proportions %>%
+  select(STATE, prop_BCB_PAY_RAW) %>%
+  arrange(desc(prop_BCB_PAY_RAW)) %>%  # Sorting in descending order
+  head(10)  # Select the top 10 rows
+
+# View the result
+print(top_10)
+```
+
+The 10 states/territories with the highest proportion of respondents who checked payment as a barrier to getting postpartum birth control are: Puerto Rico, Indiana, Mississippi, West Virginia, Utah, Wyoming, Kansas, Georgia, Iowa, and Missouri. 
+
+```{r}
+# Sort by the 'prop_BCB_PAY_RAW' column and select the bottom 10 rows
+bot_10 <- state_proportions %>%
+  select(STATE, prop_BCB_PAY_RAW) %>%
+  arrange(desc(prop_BCB_PAY_RAW)) %>%  # Sorting in descending order
+  tail(10)  # Select the bottom 10 rows
+
+# View the result
+print(bot_10)
+```
+The 10 states/territories with the lowest proportion of respondents who checked payment as a barrier to getting postpartum birth control are: Colorado, Pennsylvania, New York City, Illinois, Minnesota, Hawaii, District of Columbia, Rhode Island, Washington, and Northern Mariana Islands.
+
+
+```{r}
+# Chi-square test for each reason variable, assuming 1 and 2 as the binary values
+chi_square_results <- lapply(reason_vars, function(var) {
+  # Create a contingency table: counts of 1 and 2 for each state
+  table_data <- table(dat2$STATE, dat2[[var]])
+  
+  # Perform chi-square test
+  test_result <- chisq.test(table_data)
+  
+  # Return the results: statistic, p-value, and degrees of freedom
+  return(list(variable = var, statistic = test_result$statistic, 
+              p_value = test_result$p.value, df = test_result$parameter))
+})
+
+# Convert the results into a readable format
+chi_square_results_df <- do.call(rbind, lapply(chi_square_results, function(x) data.frame(x)))
+print(chi_square_results_df)
+```
+
+The chi-square statistics are large and suggest a significant association between the state and the reason for not using birth control.
+The p-values are extremely small, which confirms that these results are highly statistically significant.
+The degrees of freedom are consistent with the number of states and binary coded variables.
+
+```{r}
+# Washington, Wisconsin, Delaware, Arkansas, Mississippi
+dat3 <- dat2 %>% 
+  filter(STATE %in% c("WA", "WI", "DE", "AR", "MS"))
+
+# Chi-square test for each reason variable, assuming 1 and 2 as the binary values
+chi_square_results <- lapply(reason_vars, function(var) {
+  # Create a contingency table: counts of 1 and 2 for each state
+  table_data <- table(dat3$STATE, dat3[[var]])
+  
+  # Perform chi-square test
+  test_result <- chisq.test(table_data)
+  
+  # Return the results: statistic, p-value, and degrees of freedom
+  return(list(variable = var, statistic = test_result$statistic, 
+              p_value = test_result$p.value, df = test_result$parameter))
+})
+
+# Convert the results into a readable format
+chi_square_results_df <- do.call(rbind, lapply(chi_square_results, function(x) data.frame(x)))
+print(chi_square_results_df)
+```
+
+
+5 States of Interest: Proportions and Frequencies
+```{r}
+calculate_proportions <- function(dat3, reason_vars) {
+  dat3 %>%
+    group_by(STATE) %>%
+    summarise(
+       total_rows = n(),  # Total number of rows for each state
+       across(all_of(reason_vars), 
+                     list(
+                       count_1 = ~ sum(. == 1, na.rm = TRUE), # 1 = no, not checked as a reason
+                       count_2 = ~ sum(. == 2, na.rm = TRUE), # 2 = yes, checked as a reason
+                       freq_1 = ~ sum(. == 1, na.rm = TRUE) / sum(!is.na(.)),
+                       freq_2 = ~ sum(. == 2, na.rm = TRUE) / sum(!is.na(.))
+                     ),
+                     .names = "{.col}_{.fn}"))
+}
+
+# Apply the function
+five_states <- calculate_proportions(dat3, reason_vars)
+
+# View the result
+print(five_states)
+```
+```{r}
+overall_summary <- dat3 %>%
+    summarise(
+      STATE = "ALL",  # Label for the overall summary row
+      total_rows = n(),  # Total number of rows across all states
+      across(all_of(reason_vars), 
+             list(
+               count_1 = ~ sum(. == 1, na.rm = TRUE),
+               count_2 = ~ sum(. == 2, na.rm = TRUE),
+               freq_1 = ~ sum(. == 1, na.rm = TRUE) / sum(!is.na(.)),
+               freq_2 = ~ sum(. == 2, na.rm = TRUE) / sum(!is.na(.))
+             ),
+             .names = "{.col}_{.fn}")
+    )
+
+print(overall_summary)
+```
+
+
+
